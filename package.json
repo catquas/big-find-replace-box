@@ -35,6 +35,10 @@
       {
         "command": "vimBigCmdline.hide",
         "title": "Vim Big Cmdline: Hide"
+      },
+      {
+        "command": "vimBigCmdline.clearHistory",
+        "title": "Vim Big Cmdline: Clear Command History"
       }
     ],
     "viewsContainers": {
@@ -72,10 +76,65 @@
         },
         "vimBigCmdline.panelHeightHint": {
           "type": "number",
-          "default": 96,
+          "default": 120,
           "minimum": 56,
-          "maximum": 240,
-          "description": "Preferred height, in pixels, for the command-line surface. VS Code ultimately controls panel sizing."
+          "maximum": 400,
+          "description": "Minimum height, in pixels, for the command-line surface. Drag the panel border to make it taller; the input grows to fill whatever height the panel has."
+        },
+        "vimBigCmdline.wrapLongInput": {
+          "type": "boolean",
+          "default": true,
+          "description": "Wrap long commands onto multiple lines instead of scrolling horizontally on one line."
+        },
+        "vimBigCmdline.caseSensitivity": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ignore",
+            "match"
+          ],
+          "enumDescriptions": [
+            "Follow VSCodeVim's vim.ignorecase and vim.smartcase settings (both default to true, so matching is case-insensitive until the pattern contains an uppercase letter).",
+            "Always ignore case in the preview.",
+            "Always match case in the preview."
+          ],
+          "default": "auto",
+          "description": "How the live preview treats letter case. Inline \\c and \\C in the pattern always win over this setting."
+        },
+        "vimBigCmdline.regexFlavor": {
+          "type": "string",
+          "enum": [
+            "vim",
+            "javascript"
+          ],
+          "enumDescriptions": [
+            "Interpret patterns using Vim 'magic' rules: ( ) { } + ? | are literal until escaped with a backslash.",
+            "Interpret patterns as JavaScript regular expressions."
+          ],
+          "default": "vim",
+          "description": "Regex dialect used for the live preview. This only affects the preview; VSCodeVim always executes the command itself."
+        },
+        "vimBigCmdline.forceBottomPanelPosition": {
+          "type": "boolean",
+          "default": true,
+          "description": "Move VS Code's panel to the bottom of the window when the command line opens, so it is a full-width bar across the bottom of the screen rather than a column beside the editor."
+        },
+        "vimBigCmdline.hidePanelWhenDone": {
+          "type": "boolean",
+          "default": true,
+          "description": "Close the panel when you press Enter or Esc, so the command line is only on screen while you are using it."
+        },
+        "vimBigCmdline.panelSizeBoost": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "How many size steps to enlarge the panel by while the command line is open. The panel shrinks back by the same amount when you finish. Set to 0 to leave the panel size alone."
+        },
+        "vimBigCmdline.maximizePanelOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Maximize the panel while the command line is open, instead of enlarging it by vimBigCmdline.panelSizeBoost steps. This gives the most typing room but hides the editor, so you lose the live match preview."
         },
         "vimBigCmdline.executeWithVscodeVimRemap": {
           "type": "boolean",
