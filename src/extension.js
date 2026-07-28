@@ -1,13 +1,19 @@
 const vscode = require('vscode');
 
 const VIEW_ID = 'vimBigCmdline.view';
-const MAX_DECORATIONS = 1000;
+const MAX_DECORATIONS = 5000;
+const HISTORY_LIMIT = 100;
+const PREVIEW_DEBOUNCE_MS = 40;
+const HISTORY_KEYS = {
+  search: 'vimBigCmdline.history.search',
+  command: 'vimBigCmdline.history.command',
+};
 
 /** @type {BigCmdlineProvider | undefined} */
 let provider;
 
 function activate(context) {
-  provider = new BigCmdlineProvider(context.extensionUri);
+  provider = new BigCmdlineProvider(context.extensionUri, context.globalState);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(VIEW_ID, provider, {
@@ -19,9 +25,17 @@ function activate(context) {
     vscode.commands.registerCommand('vimBigCmdline.command', async () => {
       await provider.open(':');
     }),
-    vscode.commands.registerCommand('vimBigCmdline.hide', () => {
-      provider.hide();
-      provider.clearPreview();
+    vscode.commands.registerCommand('vimBigCmdline.hide', async () => {
+      await provider.finish();
+    }),
+    vscode.commands.registerCommand('vimBigCmdline.clearHistory', async () => {
+      await provider.clearHistory();
+      vscode.window.showInformationMessage('Vim Big Cmdline history cleared.');
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('vimBigCmdline') || event.affectsConfiguration('vim')) {
+        provider.sendConfiguration();
+      }
     })
   );
 }
@@ -31,14 +45,22 @@ function deactivate() {
 }
 
 class BigCmdlineProvider {
-  constructor(extensionUri) {
+  constructor(extensionUri, memento) {
     this.extensionUri = extensionUri;
+    this.memento = memento;
     this.view = undefined;
     this.pendingPrefix = ':';
+    this.previewTimer = undefined;
+    this.decoratedEditor = undefined;
+    this.openedPanel = false;
+    this.maximizedPanel = false;
+    this.appliedBoost = 0;
     this.searchDecoration = vscode.window.createTextEditorDecorationType({
       backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
       border: '1px solid',
       borderColor: new vscode.ThemeColor('editor.findMatchBorder'),
+      overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.findMatchForeground'),
+      overviewRulerLane: vscode.OverviewRulerLane.Center,
     });
     this.currentSearchDecoration = vscode.window.createTextEditorDecorationType({
       backgroundColor: new vscode.ThemeColor('editor.findMatchBackground'),
@@ -82,62 +104,182 @@ class BigCmdlineProvider {
           await this.submit(message.prefix, message.value || '');
           break;
         case 'input':
-          this.updatePreview(message.prefix, message.value || '');
+          this.schedulePreview(message.prefix, message.value || '');
           break;
         case 'cancel':
-          this.hide();
-          this.clearPreview();
-          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+          await this.finish();
           break;
       }
     });
 
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration('vimBigCmdline')) {
-        this.sendConfiguration();
+    webviewView.onDidChangeVisibility(() => {
+      if (!webviewView.visible) {
+        this.cancelScheduledPreview();
+        this.clearPreview();
       }
     });
   }
 
   async open(prefix) {
     this.pendingPrefix = prefix;
+    // Remember whether we are the ones putting the panel on screen, so that
+    // finishing can put it away again without closing a panel the user had
+    // deliberately open.
+    this.openedPanel = !this.view?.visible;
+    const config = vscode.workspace.getConfiguration('vimBigCmdline');
+    if (config.get('forceBottomPanelPosition', true)) {
+      await runCommandQuietly('workbench.action.positionPanelBottom');
+    }
     await focusCmdlineView();
+    await this.growPanel(config);
     this.show(prefix);
+  }
+
+  /**
+   * Give the command line more room while it is open. Both moves are undone by
+   * `shrinkPanel`, so the user's layout comes back afterwards.
+   */
+  async growPanel(config) {
+    if (config.get('maximizePanelOnOpen', false)) {
+      this.maximizedPanel = await runCommandQuietly('workbench.action.toggleMaximizedPanel');
+      return;
+    }
+
+    const steps = clamp(Number(config.get('panelSizeBoost', 3)) || 0, 0, 10);
+    this.appliedBoost = 0;
+    for (let i = 0; i < steps; i++) {
+      if (!(await runCommandQuietly('workbench.action.increaseViewSize'))) {
+        break;
+      }
+      this.appliedBoost++;
+    }
+  }
+
+  async shrinkPanel() {
+    if (!this.maximizedPanel && this.appliedBoost === 0) {
+      return;
+    }
+
+    // These workbench commands resize whichever part has focus, so make sure
+    // that is still us before undoing what growPanel did.
+    await focusCmdlineView();
+
+    if (this.maximizedPanel) {
+      this.maximizedPanel = false;
+      await runCommandQuietly('workbench.action.toggleMaximizedPanel');
+      return;
+    }
+
+    while (this.appliedBoost > 0) {
+      this.appliedBoost--;
+      await runCommandQuietly('workbench.action.decreaseViewSize');
+    }
+  }
+
+  /**
+   * Leave the command line: clear it, restore the layout we changed, close the
+   * panel so the bar is only on screen while it is in use, and hand focus back
+   * to the editor.
+   */
+  async finish() {
+    this.hide();
+    this.clearPreview();
+    await this.shrinkPanel();
+
+    if (vscode.workspace.getConfiguration('vimBigCmdline').get('hidePanelWhenDone', true)) {
+      await runCommandQuietly('workbench.action.closePanel');
+    }
+    this.openedPanel = false;
+
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
   }
 
   show(prefix) {
     this.pendingPrefix = prefix;
     this.clearPreview();
     this.view?.show?.(true);
-    this.view?.webview.postMessage({ type: 'show', prefix });
+    this.view?.webview.postMessage({
+      type: 'show',
+      prefix,
+      history: this.history(prefix),
+    });
   }
 
   hide() {
+    this.cancelScheduledPreview();
     this.view?.webview.postMessage({ type: 'hide' });
   }
 
-  clearPreview() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
+  history(prefix) {
+    return this.memento.get(HISTORY_KEYS[prefix === ':' ? 'command' : 'search'], []);
+  }
+
+  async pushHistory(prefix, value) {
+    if (!value.trim()) {
       return;
     }
-    editor.setDecorations(this.searchDecoration, []);
-    editor.setDecorations(this.currentSearchDecoration, []);
-    editor.setDecorations(this.substituteDecoration, []);
-    editor.setDecorations(this.substituteAfterDecoration, []);
+    const key = HISTORY_KEYS[prefix === ':' ? 'command' : 'search'];
+    const entries = this.memento.get(key, []).filter((entry) => entry !== value);
+    entries.push(value);
+    await this.memento.update(key, entries.slice(-HISTORY_LIMIT));
+  }
+
+  async clearHistory() {
+    await this.memento.update(HISTORY_KEYS.search, []);
+    await this.memento.update(HISTORY_KEYS.command, []);
+  }
+
+  cancelScheduledPreview() {
+    if (this.previewTimer) {
+      clearTimeout(this.previewTimer);
+      this.previewTimer = undefined;
+    }
+  }
+
+  schedulePreview(prefix, value) {
+    this.cancelScheduledPreview();
+    this.previewTimer = setTimeout(() => {
+      this.previewTimer = undefined;
+      this.updatePreview(prefix, value);
+    }, PREVIEW_DEBOUNCE_MS);
+  }
+
+  clearPreview() {
+    // Decorations live on the editor they were applied to, which may no longer
+    // be the active one by the time we clear them.
+    const editors = new Set([this.decoratedEditor, vscode.window.activeTextEditor]);
+    for (const editor of editors) {
+      if (!editor) {
+        continue;
+      }
+      editor.setDecorations(this.searchDecoration, []);
+      editor.setDecorations(this.currentSearchDecoration, []);
+      editor.setDecorations(this.substituteDecoration, []);
+      editor.setDecorations(this.substituteAfterDecoration, []);
+    }
+    this.decoratedEditor = undefined;
+  }
+
+  setStatus(text, tone = 'neutral') {
+    this.view?.webview.postMessage({ type: 'status', text, tone });
   }
 
   updatePreview(prefix, rawValue) {
     const editor = vscode.window.activeTextEditor;
+    this.clearPreview();
+
     if (!editor) {
+      this.setStatus('No active editor', 'warn');
       return;
     }
 
     const value = String(rawValue);
-    this.clearPreview();
     if (!value) {
+      this.setStatus('');
       return;
     }
+
+    this.decoratedEditor = editor;
 
     if (prefix === '/' || prefix === '?') {
       this.previewSearch(editor, value, prefix === '?');
@@ -145,47 +287,70 @@ class BigCmdlineProvider {
     }
 
     const parsed = parseSubstitute(value);
-    if (parsed?.pattern) {
-      this.previewSubstitute(editor, parsed);
+    if (!parsed || !parsed.pattern) {
+      this.setStatus('');
+      return;
     }
+    this.previewSubstitute(editor, parsed);
   }
 
   previewSearch(editor, pattern, reverse) {
-    const regex = compileVimishRegex(pattern);
-    if (!regex) {
+    const compiled = compilePattern(pattern);
+    if (!compiled) {
+      this.setStatus('Invalid pattern', 'error');
       return;
     }
 
-    const ranges = findMatches(editor.document, regex, fullDocumentRange(editor.document));
-    editor.setDecorations(this.searchDecoration, ranges.slice(1));
+    const ranges = findMatches(editor.document, compiled.regex, fullDocumentRange(editor.document));
+    if (ranges.length === 0) {
+      this.setStatus(`No matches${caseSuffix(compiled)}`, 'warn');
+      return;
+    }
 
     const current = chooseCurrentSearchMatch(ranges, editor.selection.active, reverse);
+    editor.setDecorations(
+      this.searchDecoration,
+      current ? ranges.filter((range) => !range.isEqual(current)) : ranges
+    );
+
     if (current) {
       editor.setDecorations(this.currentSearchDecoration, [current]);
       editor.revealRange(current, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     }
+
+    const capped = ranges.length >= MAX_DECORATIONS ? '+' : '';
+    this.setStatus(`${ranges.length}${capped} ${plural(ranges.length, 'match', 'matches')}${caseSuffix(compiled)}`, 'ok');
   }
 
   previewSubstitute(editor, parsed) {
-    const regex = compileVimishRegex(parsed.pattern);
-    if (!regex) {
+    const compiled = compilePattern(parsed.pattern, substituteFlagCaseOverride(parsed.flags));
+    if (!compiled) {
+      this.setStatus('Invalid pattern', 'error');
       return;
     }
 
     const searchRange = resolveSubstituteRange(editor, parsed.range);
-    const matches = findMatches(editor.document, regex, searchRange, parsed.flags.includes('g') ? Infinity : 1);
+    if (!searchRange) {
+      this.setStatus('Invalid range', 'error');
+      return;
+    }
+
+    const global = parsed.flags.includes('g');
+    const matches = findMatches(editor.document, compiled.regex, searchRange, global ? Infinity : 1);
     const replaceDecorations = [];
     const afterDecorations = [];
+    const touchedLines = new Set();
 
     for (const range of matches) {
       const text = editor.document.getText(range);
-      const replacement = expandReplacement(parsed.replacement, text, regex);
+      const replacement = expandReplacement(parsed.replacement, text, compiled.regex);
       replaceDecorations.push(range);
+      touchedLines.add(range.start.line);
       afterDecorations.push({
         range,
         renderOptions: {
           after: {
-            contentText: `-> ${replacement}`,
+            contentText: replacement ? `→ ${replacement}` : '→ ∅',
           },
         },
       });
@@ -193,6 +358,23 @@ class BigCmdlineProvider {
 
     editor.setDecorations(this.substituteDecoration, replaceDecorations);
     editor.setDecorations(this.substituteAfterDecoration, afterDecorations);
+
+    if (matches.length === 0) {
+      this.setStatus(`No matches${caseSuffix(compiled)}`, 'warn');
+      return;
+    }
+
+    if (matches.length) {
+      editor.revealRange(matches[0], vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }
+
+    const capped = matches.length >= MAX_DECORATIONS ? '+' : '';
+    const scope = describeRange(parsed.range);
+    this.setStatus(
+      `${matches.length}${capped} ${plural(matches.length, 'replacement', 'replacements')} on ` +
+        `${touchedLines.size} ${plural(touchedLines.size, 'line', 'lines')}${scope}${caseSuffix(compiled)}`,
+      'ok'
+    );
   }
 
   sendConfiguration() {
@@ -201,15 +383,15 @@ class BigCmdlineProvider {
       type: 'config',
       fontSize: config.get('fontSize', 30),
       fontFamily: config.get('fontFamily', 'var(--vscode-editor-font-family)'),
-      panelHeightHint: config.get('panelHeightHint', 96),
+      panelHeightHint: config.get('panelHeightHint', 120),
+      wrap: config.get('wrapLongInput', true),
     });
   }
 
   async submit(prefix, rawValue) {
     const value = String(rawValue);
-    this.hide();
-    this.clearPreview();
-    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+    await this.pushHistory(prefix, value);
+    await this.finish();
 
     if (!vscode.workspace.getConfiguration('vimBigCmdline').get('executeWithVscodeVimRemap', true)) {
       return;
@@ -237,7 +419,9 @@ class BigCmdlineProvider {
     :root {
       --cmd-font-size: 30px;
       --cmd-font-family: var(--vscode-editor-font-family);
-      --cmd-height: 96px;
+      --cmd-min-height: 120px;
+      --cmd-wrap: pre-wrap;
+      --cmd-break: break-word;
     }
     html, body {
       box-sizing: border-box;
@@ -253,45 +437,60 @@ class BigCmdlineProvider {
     }
     body {
       display: flex;
-      align-items: center;
-      min-height: var(--cmd-height);
-      padding: 10px 14px;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 12px;
       border-top: 1px solid var(--vscode-panel-border);
       font-family: var(--cmd-font-family);
     }
     .shell {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      align-items: center;
+      display: flex;
+      align-items: stretch;
       gap: 10px;
+      flex: 1 1 auto;
+      min-height: 0;
       width: 100%;
     }
     .prefix {
+      flex: 0 0 auto;
+      padding-top: 6px;
       color: var(--vscode-terminal-ansiBrightCyan);
-      font-size: calc(var(--cmd-font-size) * 1.12);
+      font-size: calc(var(--cmd-font-size) * 1.1);
       font-weight: 800;
-      line-height: 1;
+      line-height: 1.35;
     }
-    .input-wrap {
-      position: relative;
+    .input-scroll {
+      flex: 1 1 auto;
       min-width: 0;
+      max-height: 100%;
+      overflow: auto;
       border: 1px solid var(--vscode-input-border, transparent);
       border-radius: 8px;
       background: var(--vscode-input-background);
-      box-shadow: 0 0 0 1px rgba(255,255,255,0.02) inset;
+    }
+    /* The mirror is in flow and sizes this box, so the box (and the textarea
+       stretched over it) grows with the text instead of clipping it. */
+    .input-wrap {
+      position: relative;
+      min-width: 0;
+      min-height: var(--cmd-min-height);
     }
     #mirror, #cmdline {
+      display: block;
       width: 100%;
       min-height: calc(var(--cmd-font-size) * 1.75);
-      padding: 10px 12px;
+      margin: 0;
+      padding: 8px 12px;
       border: 0;
       font-family: var(--cmd-font-family);
       font-size: var(--cmd-font-size);
       font-weight: 650;
       line-height: 1.35;
       letter-spacing: 0.01em;
-      white-space: pre-wrap;
-      word-break: break-word;
+      white-space: var(--cmd-wrap);
+      word-break: var(--cmd-break);
+      overflow-wrap: var(--cmd-break);
+      tab-size: 4;
     }
     #mirror {
       pointer-events: none;
@@ -324,56 +523,104 @@ class BigCmdlineProvider {
     .class { color: var(--vscode-terminal-ansiBlue); }
     .group { color: var(--vscode-terminal-ansiBrightYellow); }
     .quantifier { color: var(--vscode-terminal-ansiBrightRed); }
-    .hint {
-      position: absolute;
-      right: 8px;
-      bottom: 3px;
-      color: var(--vscode-descriptionForeground);
+    .statusbar {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      flex: 0 0 auto;
       font-family: var(--vscode-font-family);
       font-size: 11px;
-      font-weight: 400;
-      opacity: 0.75;
+      line-height: 1.4;
     }
-    .hidden {
-      display: none;
+    #status {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    #status.ok { color: var(--vscode-terminal-ansiBrightGreen); }
+    #status.warn { color: var(--vscode-editorWarning-foreground, var(--vscode-terminal-ansiYellow)); }
+    #status.error { color: var(--vscode-errorForeground); }
+    #status.neutral { color: var(--vscode-descriptionForeground); }
+    .hint {
+      flex: 0 0 auto;
+      color: var(--vscode-descriptionForeground);
+      opacity: 0.8;
+      white-space: nowrap;
+    }
+    @media (max-width: 640px) {
+      .hint { display: none; }
     }
   </style>
 </head>
 <body>
   <div class="shell">
     <div id="prefix" class="prefix">:</div>
-    <div class="input-wrap">
-      <div id="mirror" aria-hidden="true"><span class="placeholder">Type a Vim command…</span></div>
-      <textarea id="cmdline" rows="1" spellcheck="false" autocapitalize="none" autocomplete="off"></textarea>
-      <div id="hint" class="hint">Enter to run · Esc to cancel</div>
+    <div class="input-scroll" id="scroller">
+      <div class="input-wrap">
+        <div id="mirror" aria-hidden="true"><span class="placeholder">Type a Vim command…</span></div>
+        <textarea id="cmdline" rows="1" spellcheck="false" autocapitalize="none" autocorrect="off" autocomplete="off"></textarea>
+      </div>
     </div>
+  </div>
+  <div class="statusbar">
+    <div id="status" class="neutral"></div>
+    <div class="hint">Enter run · Shift+Enter newline · ↑↓ history · Esc cancel</div>
   </div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const prefixEl = document.getElementById('prefix');
     const input = document.getElementById('cmdline');
     const mirror = document.getElementById('mirror');
+    const statusEl = document.getElementById('status');
+    const scroller = document.getElementById('scroller');
     let prefix = ':';
+    let history = [];
+    let historyIndex = -1;
+    let draft = '';
 
     window.addEventListener('message', event => {
       const message = event.data || {};
       if (message.type === 'show') {
         prefix = message.prefix || ':';
         prefixEl.textContent = prefix;
-        input.value = prefix === ':' ? '' : '';
+        history = Array.isArray(message.history) ? message.history : [];
+        historyIndex = -1;
+        draft = '';
+        input.value = '';
+        setStatus('', 'neutral');
         render();
         requestAnimationFrame(() => input.focus());
       } else if (message.type === 'hide') {
         input.value = '';
-        render();
+        historyIndex = -1;
+        draft = '';
+        setStatus('', 'neutral');
+        render(true);
+      } else if (message.type === 'status') {
+        setStatus(message.text || '', message.tone || 'neutral');
       } else if (message.type === 'config') {
-        document.documentElement.style.setProperty('--cmd-font-size', Number(message.fontSize || 30) + 'px');
-        document.documentElement.style.setProperty('--cmd-font-family', message.fontFamily || 'var(--vscode-editor-font-family)');
-        document.documentElement.style.setProperty('--cmd-height', Number(message.panelHeightHint || 96) + 'px');
+        const root = document.documentElement.style;
+        root.setProperty('--cmd-font-size', Number(message.fontSize || 30) + 'px');
+        root.setProperty('--cmd-font-family', message.fontFamily || 'var(--vscode-editor-font-family)');
+        root.setProperty('--cmd-min-height', Number(message.panelHeightHint || 120) + 'px');
+        root.setProperty('--cmd-wrap', message.wrap === false ? 'pre' : 'pre-wrap');
+        root.setProperty('--cmd-break', message.wrap === false ? 'normal' : 'break-word');
       }
     });
 
-    input.addEventListener('input', render);
+    function setStatus(text, tone) {
+      statusEl.textContent = text;
+      statusEl.className = tone || 'neutral';
+    }
+
+    input.addEventListener('input', () => {
+      historyIndex = -1;
+      render();
+    });
+
     input.addEventListener('keydown', event => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
@@ -381,24 +628,93 @@ class BigCmdlineProvider {
       } else if (event.key === 'Escape') {
         event.preventDefault();
         vscode.postMessage({ type: 'cancel' });
+      } else if (isHistoryKey(event, 'prev')) {
+        if (navigateHistory(-1)) event.preventDefault();
+      } else if (isHistoryKey(event, 'next')) {
+        if (navigateHistory(1)) event.preventDefault();
       } else if (event.key === 'Tab') {
         event.preventDefault();
-        const start = input.selectionStart;
-        const end = input.selectionEnd;
-        input.value = input.value.slice(0, start) + '\\t' + input.value.slice(end);
-        input.selectionStart = input.selectionEnd = start + 1;
+        insertAtCaret('\\t');
+      } else if (event.key === 'u' && event.ctrlKey) {
+        event.preventDefault();
+        input.value = input.value.slice(input.selectionStart);
+        input.selectionStart = input.selectionEnd = 0;
+        historyIndex = -1;
         render();
+      } else if (event.key === 'w' && event.ctrlKey) {
+        event.preventDefault();
+        deleteWordBefore();
       }
     });
 
-    function render() {
+    function isHistoryKey(event, direction) {
+      if (event.ctrlKey && event.key === (direction === 'prev' ? 'p' : 'n')) return true;
+      if (event.altKey || event.metaKey || event.ctrlKey) return false;
+      if (event.key !== (direction === 'prev' ? 'ArrowUp' : 'ArrowDown')) return false;
+      // Shift+Enter can produce a multi-line command; leave the arrows alone
+      // unless the caret is already on the first (or last) line.
+      return direction === 'prev'
+        ? !input.value.slice(0, input.selectionStart).includes('\\n')
+        : !input.value.slice(input.selectionEnd).includes('\\n');
+    }
+
+    function navigateHistory(delta) {
+      if (history.length === 0) return false;
+
+      let next;
+      if (historyIndex === -1) {
+        if (delta > 0) return false;
+        draft = input.value;
+        next = history.length - 1;
+      } else {
+        next = historyIndex + delta;
+        if (next < 0) return false;
+        if (next >= history.length) next = -1;
+      }
+
+      historyIndex = next;
+      input.value = historyIndex === -1 ? draft : history[historyIndex];
+      input.selectionStart = input.selectionEnd = input.value.length;
+      render();
+      return true;
+    }
+
+    function insertAtCaret(text) {
+      const start = input.selectionStart;
+      const end = input.selectionEnd;
+      input.value = input.value.slice(0, start) + text + input.value.slice(end);
+      input.selectionStart = input.selectionEnd = start + text.length;
+      historyIndex = -1;
+      render();
+    }
+
+    function deleteWordBefore() {
+      const start = input.selectionStart;
+      if (start === 0) return;
+      const before = input.value.slice(0, start);
+      const trimmed = before.replace(/\\s*\\S+$/, '');
+      input.value = trimmed + input.value.slice(input.selectionEnd);
+      input.selectionStart = input.selectionEnd = trimmed.length;
+      historyIndex = -1;
+      render();
+    }
+
+    function render(skipPreview) {
       if (!input.value) {
         mirror.innerHTML = '<span class="placeholder">' + (prefix === ':' ? 'Type a Vim command…' : 'Type a search pattern…') + '</span>';
-        vscode.postMessage({ type: 'input', prefix, value: input.value });
-        return;
+      } else {
+        mirror.innerHTML = prefix === ':' ? highlightCommand(input.value) : highlightSearch(input.value);
       }
-      mirror.innerHTML = prefix === ':' ? highlightCommand(input.value) : highlightSearch(input.value);
-      vscode.postMessage({ type: 'input', prefix, value: input.value });
+      keepCaretVisible();
+      if (!skipPreview) {
+        vscode.postMessage({ type: 'input', prefix, value: input.value });
+      }
+    }
+
+    function keepCaretVisible() {
+      if (input.selectionStart === input.value.length) {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
     }
 
     function highlightCommand(text) {
@@ -412,15 +728,15 @@ class BigCmdlineProvider {
         span('command', parsed.command),
         span('delimiter', parsed.delimiter),
         highlightRegex(parsed.pattern, 'pattern'),
-        span('delimiter', parsed.delimiter),
-        highlightReplacement(parsed.replacement),
         parsed.hasSecondDelimiter ? span('delimiter', parsed.delimiter) : '',
+        highlightReplacement(parsed.replacement),
+        parsed.hasThirdDelimiter ? span('delimiter', parsed.delimiter) : '',
         span('flags', parsed.flags)
       ].join('');
     }
 
     function parseSubstitute(text) {
-      const head = text.match(/^((?:%|\\d+|\\.|\\$|'[a-zA-Z]|[<>])?(?:,(?:%|\\d+|\\.|\\$|'[a-zA-Z]|[<>]))?)(s(?:ubstitute)?)(.)/);
+      const head = text.match(/^((?:%|\\d+|\\.|\\$|'[a-zA-Z<>])(?:[+-]\\d*)?(?:,(?:%|\\d+|\\.|\\$|'[a-zA-Z<>])(?:[+-]\\d*)?)?)?(s(?:ubstitute)?)([^a-zA-Z0-9\\s\\\\"|])/);
       if (!head) return undefined;
 
       const range = head[1] || '';
@@ -437,6 +753,7 @@ class BigCmdlineProvider {
         pattern: first.value,
         replacement: second.value,
         hasSecondDelimiter: first.found,
+        hasThirdDelimiter: second.found,
         flags: second.found ? rest.slice(second.nextIndex) : '',
       };
     }
@@ -536,7 +853,9 @@ class BigCmdlineProvider {
 </body>
 </html>`;
   }
+
   dispose() {
+    this.cancelScheduledPreview();
     this.searchDecoration.dispose();
     this.currentSearchDecoration.dispose();
     this.substituteDecoration.dispose();
@@ -545,7 +864,9 @@ class BigCmdlineProvider {
 }
 
 function parseSubstitute(text) {
-  const head = text.match(/^((?:%|\d+|\.|\$|'[a-zA-Z]|[<>])?(?:,(?:%|\d+|\.|\$|'[a-zA-Z]|[<>]))?)(s(?:ubstitute)?)(.)/);
+  const head = text.match(
+    /^((?:%|\d+|\.|\$|'[a-zA-Z<>])(?:[+-]\d*)?(?:,(?:%|\d+|\.|\$|'[a-zA-Z<>])(?:[+-]\d*)?)?)?(s(?:ubstitute)?)([^a-zA-Z0-9\s\\"|])/
+  );
   if (!head) {
     return undefined;
   }
@@ -564,6 +885,7 @@ function parseSubstitute(text) {
     pattern: first.value,
     replacement: second.value,
     hasSecondDelimiter: first.found,
+    hasThirdDelimiter: second.found,
     flags: second.found ? rest.slice(second.nextIndex) : '',
   };
 }
@@ -585,25 +907,167 @@ function readUntilDelimiter(text, delimiter, start) {
   return { value, nextIndex: text.length, found: false };
 }
 
-function compileVimishRegex(pattern) {
+/**
+ * Compile a Vim-flavored pattern into a JavaScript RegExp, applying the same
+ * case rules VSCodeVim uses (`vim.ignorecase` / `vim.smartcase`, plus inline
+ * `\c` / `\C` overrides).
+ *
+ * @returns {{ regex: RegExp, ignoreCase: boolean, override: 'insensitive'|'sensitive'|undefined } | undefined}
+ */
+function compilePattern(pattern, flagOverride) {
+  if (!pattern) {
+    return undefined;
+  }
+
+  const { pattern: stripped, override: inlineOverride } = extractCaseOverride(pattern);
+  // Vim: \c / \C inside the pattern overrule the :s///i and :s///I flags.
+  const override = inlineOverride || flagOverride;
+  const flavor = vscode.workspace.getConfiguration('vimBigCmdline').get('regexFlavor', 'vim');
+  const source = flavor === 'javascript' ? stripped : vimRegexToJavaScript(stripped);
+  const ignoreCase = shouldIgnoreCase(stripped, override);
+
   try {
-    return new RegExp(vimRegexToJavaScript(pattern), 'g');
+    return { regex: new RegExp(source, ignoreCase ? 'gi' : 'g'), ignoreCase, override };
   } catch {
     return undefined;
   }
 }
 
+/**
+ * Remove Vim's inline case markers (`\c` = ignore case, `\C` = match case) from
+ * a pattern, reporting whichever one appeared first. Vim honors these anywhere
+ * in the pattern, regardless of 'ignorecase'/'smartcase'.
+ */
+function extractCaseOverride(pattern) {
+  let out = '';
+  let override;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char !== '\\' || i + 1 >= pattern.length) {
+      out += char;
+      continue;
+    }
+
+    const next = pattern[i + 1];
+    if (next === 'c' || next === 'C') {
+      override = override || (next === 'c' ? 'insensitive' : 'sensitive');
+      i++;
+      continue;
+    }
+
+    out += char + next;
+    i++;
+  }
+
+  return { pattern: out, override };
+}
+
+/** Vim's `:s///i` forces ignore case and `:s///I` forces match case. */
+function substituteFlagCaseOverride(flags) {
+  const match = String(flags || '').match(/[iI]/);
+  if (!match) {
+    return undefined;
+  }
+  return match[0] === 'i' ? 'insensitive' : 'sensitive';
+}
+
+function shouldIgnoreCase(pattern, override) {
+  if (override) {
+    return override === 'insensitive';
+  }
+
+  const mode = vscode.workspace.getConfiguration('vimBigCmdline').get('caseSensitivity', 'auto');
+  if (mode === 'ignore') {
+    return true;
+  }
+  if (mode === 'match') {
+    return false;
+  }
+
+  const vim = vscode.workspace.getConfiguration('vim');
+  if (!vim.get('ignorecase', true)) {
+    return false;
+  }
+  if (vim.get('smartcase', true) && hasUppercase(pattern)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Vim's smartcase check skips backslash escapes, so `\S` does not make a
+ * pattern case-sensitive but `Foo` does.
+ */
+function hasUppercase(pattern) {
+  for (let i = 0; i < pattern.length; i++) {
+    if (pattern[i] === '\\') {
+      i++;
+      continue;
+    }
+    if (pattern[i] !== pattern[i].toLowerCase()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Translate Vim "magic" regex syntax to JavaScript in a single pass, so that
+ * escaped backslashes (`\\(`) are not mistaken for group markers. In magic mode
+ * `( ) { } + ? |` are literal until escaped, which is the opposite of JS.
+ */
 function vimRegexToJavaScript(pattern) {
-  return pattern
-    .replace(/\\\(/g, '(')
-    .replace(/\\\)/g, ')')
-    .replace(/\\\+/g, '+')
-    .replace(/\\\?/g, '?')
-    .replace(/\\\|/g, '|')
-    .replace(/\\{/g, '{')
-    .replace(/\\}/g, '}')
-    .replace(/\\</g, '\\b')
-    .replace(/\\>/g, '\\b');
+  let out = '';
+
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+
+    if (char === '\\' && i + 1 < pattern.length) {
+      const next = pattern[i + 1];
+      i++;
+      switch (next) {
+        case '(':
+        case ')':
+        case '{':
+        case '}':
+        case '+':
+        case '|':
+        case '?':
+          out += next;
+          break;
+        case '=':
+          out += '?';
+          break;
+        case '<':
+        case '>':
+          out += '\\b';
+          break;
+        case '%':
+          if (pattern[i + 1] === '(') {
+            out += '(?:';
+            i++;
+          } else {
+            out += '%';
+          }
+          break;
+        default:
+          out += '\\' + next;
+          break;
+      }
+      continue;
+    }
+
+    // Literal in Vim, special in JavaScript.
+    if ('(){}+?|'.includes(char)) {
+      out += '\\' + char;
+      continue;
+    }
+
+    out += char;
+  }
+
+  return out;
 }
 
 function fullDocumentRange(document) {
@@ -613,25 +1077,85 @@ function fullDocumentRange(document) {
 
 function resolveSubstituteRange(editor, rangeText) {
   const document = editor.document;
-  if (rangeText === '%') {
+  const spec = (rangeText || '').trim();
+
+  if (spec === '%') {
     return fullDocumentRange(document);
   }
 
-  const lineNumberRange = rangeText.match(/^(\d+),(\d+)$/);
-  if (lineNumberRange) {
-    const start = clamp(Number(lineNumberRange[1]) - 1, 0, document.lineCount - 1);
-    const end = clamp(Number(lineNumberRange[2]) - 1, start, document.lineCount - 1);
-    return new vscode.Range(start, 0, end, document.lineAt(end).text.length);
+  if (!spec) {
+    return lineRange(document, editor.selection.active.line);
   }
 
-  const singleLine = rangeText.match(/^\d+$/);
-  if (singleLine) {
-    const line = clamp(Number(singleLine[0]) - 1, 0, document.lineCount - 1);
-    return new vscode.Range(line, 0, line, document.lineAt(line).text.length);
+  const parts = spec.split(',');
+  if (parts.length > 2) {
+    return undefined;
   }
 
-  const activeLine = editor.selection.active.line;
-  return new vscode.Range(activeLine, 0, activeLine, document.lineAt(activeLine).text.length);
+  const first = resolveLineSpec(editor, parts[0]);
+  if (first === undefined) {
+    return undefined;
+  }
+  const second = parts.length === 2 ? resolveLineSpec(editor, parts[1]) : first;
+  if (second === undefined) {
+    return undefined;
+  }
+
+  const start = Math.min(first, second);
+  const end = Math.max(first, second);
+  return new vscode.Range(start, 0, end, document.lineAt(end).text.length);
+}
+
+/** Resolve a single Vim line address (`.`, `$`, `12`, `'<`, `.+3`) to a 0-based line. */
+function resolveLineSpec(editor, spec) {
+  const document = editor.document;
+  const match = String(spec).trim().match(/^(%|\.|\$|\d+|'[a-zA-Z<>])?([+-]\d*)?$/);
+  if (!match || (!match[1] && !match[2])) {
+    return undefined;
+  }
+
+  const lastLine = document.lineCount - 1;
+  let base;
+
+  switch (match[1]) {
+    case undefined:
+    case '.':
+      base = editor.selection.active.line;
+      break;
+    case '%':
+      base = 0;
+      break;
+    case '$':
+      base = lastLine;
+      break;
+    case "'<":
+      base = editor.selection.start.line;
+      break;
+    case "'>":
+      base = editor.selection.end.line;
+      break;
+    default:
+      if (/^\d+$/.test(match[1])) {
+        base = Number(match[1]) - 1;
+      } else {
+        // Unsupported mark: fall back to the cursor line rather than failing.
+        base = editor.selection.active.line;
+      }
+      break;
+  }
+
+  if (match[2]) {
+    const sign = match[2][0] === '-' ? -1 : 1;
+    const amount = match[2].length > 1 ? Number(match[2].slice(1)) : 1;
+    base += sign * amount;
+  }
+
+  return clamp(base, 0, lastLine);
+}
+
+function lineRange(document, line) {
+  const safe = clamp(line, 0, document.lineCount - 1);
+  return new vscode.Range(safe, 0, safe, document.lineAt(safe).text.length);
 }
 
 function findMatches(document, regex, searchRange, maxPerLine = Infinity) {
@@ -681,15 +1205,52 @@ function chooseCurrentSearchMatch(ranges, position, reverse) {
 function expandReplacement(replacement, matchedText, regex) {
   try {
     regex.lastIndex = 0;
-    const jsReplacement = replacement.replace(/&/g, '$$&').replace(/\\(\d)/g, '$$$1');
+    const jsReplacement = replacement
+      .replace(/\$/g, '$$$$')
+      .replace(/(^|[^\\])&/g, '$1$$&')
+      .replace(/\\&/g, '&')
+      .replace(/\\(\d)/g, '$$$1');
     return matchedText.replace(regex, jsReplacement);
   } catch {
     return replacement;
   }
 }
 
+function caseSuffix(compiled) {
+  if (!compiled) {
+    return '';
+  }
+  const forced = compiled.override ? ' (forced)' : '';
+  return compiled.ignoreCase ? ` · ignore case${forced}` : ` · match case${forced}`;
+}
+
+function describeRange(rangeText) {
+  const spec = (rangeText || '').trim();
+  if (!spec) {
+    return ' · current line';
+  }
+  if (spec === '%') {
+    return ' · whole file';
+  }
+  return ` · ${spec}`;
+}
+
+function plural(count, singular, pluralForm) {
+  return count === 1 ? singular : pluralForm;
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+/** Run a workbench command, ignoring the failure if this VS Code build lacks it. */
+async function runCommandQuietly(command) {
+  try {
+    await vscode.commands.executeCommand(command);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function focusCmdlineView() {
@@ -699,16 +1260,14 @@ async function focusCmdlineView() {
   ];
 
   for (const command of commands) {
-    try {
-      await vscode.commands.executeCommand(command);
+    if (await runCommandQuietly(command)) {
       return;
-    } catch {
-      // Try the next VS Code view-focus command shape.
     }
   }
 
   vscode.window.showWarningMessage(
-    'Vim Big Cmdline could not reveal its bottom panel. Open the "Vim Cmdline" panel manually once, then try again.'
+    'Vim Big Cmdline could not reveal its command line. If you dragged the "Vim Cmdline" view out of the bottom panel, ' +
+      'drag it back, or run "View: Reset View Locations" to restore it.'
   );
 }
 
@@ -738,4 +1297,13 @@ function getNonce() {
   return nonce;
 }
 
-module.exports = { activate, deactivate };
+module.exports = {
+  activate,
+  deactivate,
+  // Exported for manual testing / reuse.
+  parseSubstitute,
+  vimRegexToJavaScript,
+  extractCaseOverride,
+  hasUppercase,
+  expandReplacement,
+};
