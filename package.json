@@ -1,0 +1,108 @@
+{
+  "name": "vim-big-cmdline",
+  "displayName": "Vim Big Cmdline",
+  "description": "A large, bottom-screen command/search input for VSCodeVim, with substitute regex highlighting.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Keymaps",
+    "Other"
+  ],
+  "extensionDependencies": [
+    "vscodevim.vim"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:vimBigCmdline.search",
+    "onCommand:vimBigCmdline.command",
+    "onView:vimBigCmdline.view"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vimBigCmdline.search",
+        "title": "Vim Big Cmdline: Search"
+      },
+      {
+        "command": "vimBigCmdline.command",
+        "title": "Vim Big Cmdline: Command"
+      },
+      {
+        "command": "vimBigCmdline.hide",
+        "title": "Vim Big Cmdline: Hide"
+      }
+    ],
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "vimBigCmdline.container",
+          "title": "Vim Cmdline",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vimBigCmdline.container": [
+        {
+          "type": "webview",
+          "id": "vimBigCmdline.view",
+          "name": "Big Vim Cmdline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Vim Big Cmdline",
+      "properties": {
+        "vimBigCmdline.fontSize": {
+          "type": "number",
+          "default": 30,
+          "minimum": 16,
+          "maximum": 96,
+          "description": "Font size, in pixels, used in the large Vim command line."
+        },
+        "vimBigCmdline.fontFamily": {
+          "type": "string",
+          "default": "var(--vscode-editor-font-family)",
+          "description": "CSS font-family used in the large Vim command line."
+        },
+        "vimBigCmdline.panelHeightHint": {
+          "type": "number",
+          "default": 96,
+          "minimum": 56,
+          "maximum": 240,
+          "description": "Preferred height, in pixels, for the command-line surface. VS Code ultimately controls panel sizing."
+        },
+        "vimBigCmdline.executeWithVscodeVimRemap": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send completed input to VSCodeVim via vim.remap. Disable only for debugging."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "key": "/",
+        "command": "vimBigCmdline.search",
+        "when": "editorTextFocus && vim.active && vim.mode != 'Insert' && vim.mode != 'SearchInProgressMode' && vim.mode != 'CommandlineInProgress'"
+      },
+      {
+        "key": "shift+/",
+        "command": "vimBigCmdline.search",
+        "args": {
+          "reverse": true
+        },
+        "when": "editorTextFocus && vim.active && vim.mode != 'Insert' && vim.mode != 'SearchInProgressMode' && vim.mode != 'CommandlineInProgress'"
+      },
+      {
+        "key": "shift+;",
+        "command": "vimBigCmdline.command",
+        "when": "editorTextFocus && vim.active && vim.mode != 'Insert' && vim.mode != 'SearchInProgressMode' && vim.mode != 'CommandlineInProgress'"
+      }
+    ]
+  }
+}
