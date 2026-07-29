@@ -5,6 +5,9 @@ const MAX_DECORATIONS = 5000;
 const HISTORY_LIMIT = 100;
 const PREVIEW_DEBOUNCE_MS = 40;
 const DEFAULT_RESTORE_COMMAND = 'workbench.view.explorer';
+// 0 means "follow the editor font"; the webview turns that into a size derived
+// from VS Code's own --vscode-editor-font-size.
+const AUTO_FONT_SIZE = 0;
 const HISTORY_KEYS = {
   search: 'vimBigCmdline.history.search',
   command: 'vimBigCmdline.history.command',
@@ -375,7 +378,7 @@ class BigCmdlineProvider {
     const config = vscode.workspace.getConfiguration('vimBigCmdline');
     this.view?.webview.postMessage({
       type: 'config',
-      fontSize: config.get('fontSize', 30),
+      fontSize: config.get('fontSize', AUTO_FONT_SIZE),
       fontFamily: config.get('fontFamily', 'var(--vscode-editor-font-family)'),
       panelHeightHint: config.get('panelHeightHint', 120),
       wrap: config.get('wrapLongInput', true),
@@ -411,7 +414,9 @@ class BigCmdlineProvider {
   <title>Vim Big Cmdline</title>
   <style>
     :root {
-      --cmd-font-size: 30px;
+      /* Editor text, a little larger — not a display font. Following VS Code's
+         own editor font size keeps the gap the same whatever it is set to. */
+      --cmd-font-size: calc(var(--vscode-editor-font-size, 14px) * 1.15);
       --cmd-font-family: var(--vscode-editor-font-family);
       --cmd-min-height: 120px;
       --cmd-wrap: pre-wrap;
@@ -484,7 +489,9 @@ class BigCmdlineProvider {
       font-size: var(--cmd-font-size);
       font-weight: 650;
       line-height: 1.35;
-      letter-spacing: 0.01em;
+      /* No extra tracking: every fraction of a pixel per character is a
+         character less on the line. */
+      letter-spacing: normal;
       white-space: var(--cmd-wrap);
       word-break: var(--cmd-break);
       overflow-wrap: var(--cmd-break);
@@ -625,7 +632,11 @@ class BigCmdlineProvider {
         setStatus(message.text || '', message.tone || 'neutral');
       } else if (message.type === 'config') {
         const root = document.documentElement.style;
-        root.setProperty('--cmd-font-size', Number(message.fontSize || 30) + 'px');
+        const fontSize = Number(message.fontSize);
+        root.setProperty(
+          '--cmd-font-size',
+          fontSize > 0 ? fontSize + 'px' : 'calc(var(--vscode-editor-font-size, 14px) * 1.15)'
+        );
         root.setProperty('--cmd-font-family', message.fontFamily || 'var(--vscode-editor-font-family)');
         root.setProperty('--cmd-min-height', Number(message.panelHeightHint || 120) + 'px');
         root.setProperty('--cmd-wrap', message.wrap === false ? 'pre' : 'pre-wrap');

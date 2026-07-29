@@ -58,6 +58,8 @@ VS Code gives extensions no way to collapse a view section, and no way to ask wh
 
 The input box grows with your text and scrolls internally once it outgrows the sidebar, so a long substitute never gets clipped. `vimBigCmdline.panelHeightHint` sets a minimum height for it, and `vimBigCmdline.wrapLongInput` switches between wrapping and single-line horizontal scrolling.
 
+The text is sized off your editor font (`vimBigCmdline.fontSize` = `0`), 15% larger, so it reads as slightly-enlarged editor text and a long substitute still fits on a line or two. Set `vimBigCmdline.fontSize` to a number of pixels to pin it instead.
+
 ## Running it locally
 
 1. Open this folder in VS Code.
@@ -67,7 +69,7 @@ The input box grows with your text and scrolls internally once it outgrows the s
 
 ## Settings
 
-- `vimBigCmdline.fontSize`: default `30`
+- `vimBigCmdline.fontSize`: default `0` (follow the editor font size, plus 15%)
 - `vimBigCmdline.fontFamily`: default `var(--vscode-editor-font-family)`
 - `vimBigCmdline.panelHeightHint`: default `120`
 - `vimBigCmdline.wrapLongInput`: default `true`
