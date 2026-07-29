@@ -64,10 +64,10 @@
       "properties": {
         "vimBigCmdline.fontSize": {
           "type": "number",
-          "default": 30,
-          "minimum": 16,
+          "default": 0,
+          "minimum": 0,
           "maximum": 96,
-          "description": "Font size, in pixels, used in the large Vim command line."
+          "description": "Font size, in pixels, for the Vim command line. 0 (the default) follows your editor font size and adds 15%, so the command line reads a little larger than the editor without becoming a display font. Set a number to pin it; smaller values fit more of a long command on one line."
         },
         "vimBigCmdline.fontFamily": {
           "type": "string",
