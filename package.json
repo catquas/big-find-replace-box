@@ -42,7 +42,7 @@
       }
     ],
     "viewsContainers": {
-      "panel": [
+      "activitybar": [
         {
           "id": "vimBigCmdline.container",
           "title": "Vim Cmdline",
@@ -79,7 +79,7 @@
           "default": 120,
           "minimum": 56,
           "maximum": 400,
-          "description": "Minimum height, in pixels, for the command-line surface. Drag the panel border to make it taller; the input grows to fill whatever height the panel has."
+          "description": "Minimum height, in pixels, for the input box. The input already fills the whole sidebar, so this only matters when the view is somewhere short."
         },
         "vimBigCmdline.wrapLongInput": {
           "type": "boolean",
@@ -114,27 +114,15 @@
           "default": "vim",
           "description": "Regex dialect used for the live preview. This only affects the preview; VSCodeVim always executes the command itself."
         },
-        "vimBigCmdline.forceBottomPanelPosition": {
+        "vimBigCmdline.restoreSidebarWhenDone": {
           "type": "boolean",
           "default": true,
-          "description": "Move VS Code's panel to the bottom of the window when the command line opens, so it is a full-width bar across the bottom of the screen rather than a column beside the editor."
+          "description": "When you press Enter or Esc, put the sidebar back the way it was. This only applies when opening the command line is what revealed the sidebar; if its view was already on screen, the sidebar is left alone."
         },
-        "vimBigCmdline.hidePanelWhenDone": {
-          "type": "boolean",
-          "default": true,
-          "description": "Close the panel when you press Enter or Esc, so the command line is only on screen while you are using it."
-        },
-        "vimBigCmdline.panelSizeBoost": {
-          "type": "number",
-          "default": 3,
-          "minimum": 0,
-          "maximum": 10,
-          "description": "How many size steps to enlarge the panel by while the command line is open. The panel shrinks back by the same amount when you finish. Set to 0 to leave the panel size alone."
-        },
-        "vimBigCmdline.maximizePanelOnOpen": {
-          "type": "boolean",
-          "default": false,
-          "description": "Maximize the panel while the command line is open, instead of enlarging it by vimBigCmdline.panelSizeBoost steps. This gives the most typing room but hides the editor, so you lose the live match preview."
+        "vimBigCmdline.restoreSidebarCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command to run instead of hiding the sidebar when the command line closes. Set it to workbench.view.explorer to go back to the Explorer, or to workbench.action.closePanel if you moved the \"Vim Cmdline\" view into the bottom panel. Empty means workbench.action.closeSidebar."
         },
         "vimBigCmdline.executeWithVscodeVimRemap": {
           "type": "boolean",

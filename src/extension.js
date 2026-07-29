@@ -52,9 +52,8 @@ class BigCmdlineProvider {
     this.pendingPrefix = ':';
     this.previewTimer = undefined;
     this.decoratedEditor = undefined;
-    this.openedPanel = false;
-    this.maximizedPanel = false;
-    this.appliedBoost = 0;
+    this.active = false;
+    this.revealedView = false;
     this.searchDecoration = vscode.window.createTextEditorDecorationType({
       backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
       border: '1px solid',
@@ -96,9 +95,17 @@ class BigCmdlineProvider {
       switch (message.type) {
         case 'ready':
           this.sendConfiguration();
-          if (this.pendingPrefix) {
+          // Only take over the sidebar if the command line is actually in use;
+          // a view opened by hand stays in its idle state until it is asked for.
+          if (this.active) {
             this.show(this.pendingPrefix);
+          } else {
+            this.hide();
           }
+          break;
+        case 'activate':
+          this.revealedView = false;
+          this.show(message.prefix === '/' || message.prefix === '?' ? message.prefix : ':');
           break;
         case 'submit':
           await this.submit(message.prefix, message.value || '');
@@ -114,7 +121,10 @@ class BigCmdlineProvider {
 
     webviewView.onDidChangeVisibility(() => {
       if (!webviewView.visible) {
-        this.cancelScheduledPreview();
+        // The sidebar was switched away from or closed: the command line is no
+        // longer in use, so turn it off rather than leaving a live preview and
+        // a half-typed command behind.
+        this.hide();
         this.clearPreview();
       }
     });
@@ -122,80 +132,47 @@ class BigCmdlineProvider {
 
   async open(prefix) {
     this.pendingPrefix = prefix;
-    // Remember whether we are the ones putting the panel on screen, so that
-    // finishing can put it away again without closing a panel the user had
-    // deliberately open.
-    this.openedPanel = !this.view?.visible;
-    const config = vscode.workspace.getConfiguration('vimBigCmdline');
-    if (config.get('forceBottomPanelPosition', true)) {
-      await runCommandQuietly('workbench.action.positionPanelBottom');
-    }
+    this.active = true;
+    // Remember whether revealing the command line is what put the sidebar on
+    // screen, so that finishing can put the sidebar back the way it was without
+    // closing one the user had deliberately open.
+    this.revealedView = !this.view?.visible;
     await focusCmdlineView();
-    await this.growPanel(config);
     this.show(prefix);
   }
 
   /**
-   * Give the command line more room while it is open. Both moves are undone by
-   * `shrinkPanel`, so the user's layout comes back afterwards.
-   */
-  async growPanel(config) {
-    if (config.get('maximizePanelOnOpen', false)) {
-      this.maximizedPanel = await runCommandQuietly('workbench.action.toggleMaximizedPanel');
-      return;
-    }
-
-    const steps = clamp(Number(config.get('panelSizeBoost', 3)) || 0, 0, 10);
-    this.appliedBoost = 0;
-    for (let i = 0; i < steps; i++) {
-      if (!(await runCommandQuietly('workbench.action.increaseViewSize'))) {
-        break;
-      }
-      this.appliedBoost++;
-    }
-  }
-
-  async shrinkPanel() {
-    if (!this.maximizedPanel && this.appliedBoost === 0) {
-      return;
-    }
-
-    // These workbench commands resize whichever part has focus, so make sure
-    // that is still us before undoing what growPanel did.
-    await focusCmdlineView();
-
-    if (this.maximizedPanel) {
-      this.maximizedPanel = false;
-      await runCommandQuietly('workbench.action.toggleMaximizedPanel');
-      return;
-    }
-
-    while (this.appliedBoost > 0) {
-      this.appliedBoost--;
-      await runCommandQuietly('workbench.action.decreaseViewSize');
-    }
-  }
-
-  /**
-   * Leave the command line: clear it, restore the layout we changed, close the
-   * panel so the bar is only on screen while it is in use, and hand focus back
-   * to the editor.
+   * Leave the command line: turn the input off, drop the preview, put the
+   * sidebar back the way it was, and hand focus back to the editor.
    */
   async finish() {
     this.hide();
     this.clearPreview();
-    await this.shrinkPanel();
-
-    if (vscode.workspace.getConfiguration('vimBigCmdline').get('hidePanelWhenDone', true)) {
-      await runCommandQuietly('workbench.action.closePanel');
-    }
-    this.openedPanel = false;
-
+    await this.restoreSidebar();
     await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+  }
+
+  /**
+   * Undo the reveal from `open`. We only touch the sidebar when opening the
+   * command line is what brought it on screen; if the view was already visible,
+   * the user's layout is left alone.
+   */
+  async restoreSidebar() {
+    const revealed = this.revealedView;
+    this.revealedView = false;
+
+    const config = vscode.workspace.getConfiguration('vimBigCmdline');
+    if (!revealed || !config.get('restoreSidebarWhenDone', true)) {
+      return;
+    }
+
+    const command = String(config.get('restoreSidebarCommand', '') || '').trim();
+    await runCommandQuietly(command || 'workbench.action.closeSidebar');
   }
 
   show(prefix) {
     this.pendingPrefix = prefix;
+    this.active = true;
     this.clearPreview();
     this.view?.show?.(true);
     this.view?.webview.postMessage({
@@ -206,6 +183,7 @@ class BigCmdlineProvider {
   }
 
   hide() {
+    this.active = false;
     this.cancelScheduledPreview();
     this.view?.webview.postMessage({ type: 'hide' });
   }
@@ -440,7 +418,6 @@ class BigCmdlineProvider {
       flex-direction: column;
       gap: 6px;
       padding: 8px 12px;
-      border-top: 1px solid var(--vscode-panel-border);
       font-family: var(--cmd-font-family);
     }
     .shell {
@@ -459,10 +436,14 @@ class BigCmdlineProvider {
       font-weight: 800;
       line-height: 1.35;
     }
+    /* The input area takes the whole height the sidebar gives us, and only
+       starts scrolling once the text outgrows even that. */
     .input-scroll {
+      display: flex;
+      flex-direction: column;
       flex: 1 1 auto;
       min-width: 0;
-      max-height: 100%;
+      min-height: 0;
       overflow: auto;
       border: 1px solid var(--vscode-input-border, transparent);
       border-radius: 8px;
@@ -472,6 +453,7 @@ class BigCmdlineProvider {
        stretched over it) grows with the text instead of clipping it. */
     .input-wrap {
       position: relative;
+      flex: 1 0 auto;
       min-width: 0;
       min-height: var(--cmd-min-height);
     }
@@ -553,9 +535,28 @@ class BigCmdlineProvider {
     @media (max-width: 640px) {
       .hint { display: none; }
     }
+    /* Turned off: the command line gets out of the way and leaves the view
+       empty apart from a note saying how to bring it back. */
+    #idle {
+      display: none;
+      flex: 1 1 auto;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      color: var(--vscode-descriptionForeground);
+      font-family: var(--vscode-font-family);
+      font-size: 12px;
+      line-height: 1.6;
+      text-align: center;
+      cursor: pointer;
+    }
+    body.idle > .shell,
+    body.idle > .statusbar { display: none; }
+    body.idle > #idle { display: flex; }
+    body.idle { justify-content: center; }
   </style>
 </head>
-<body>
+<body class="idle">
   <div class="shell">
     <div id="prefix" class="prefix">:</div>
     <div class="input-scroll" id="scroller">
@@ -569,6 +570,7 @@ class BigCmdlineProvider {
     <div id="status" class="neutral"></div>
     <div class="hint">Enter run · Shift+Enter newline · ↑↓ history · Esc cancel</div>
   </div>
+  <div id="idle">Press <b>/</b>, <b>?</b>, or <b>:</b> in the editor to open the command line here, or click to start one.</div>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const prefixEl = document.getElementById('prefix');
@@ -576,6 +578,7 @@ class BigCmdlineProvider {
     const mirror = document.getElementById('mirror');
     const statusEl = document.getElementById('status');
     const scroller = document.getElementById('scroller');
+    const idleEl = document.getElementById('idle');
     let prefix = ':';
     let history = [];
     let historyIndex = -1;
@@ -591,6 +594,7 @@ class BigCmdlineProvider {
         draft = '';
         input.value = '';
         setStatus('', 'neutral');
+        document.body.classList.remove('idle');
         render();
         requestAnimationFrame(() => input.focus());
       } else if (message.type === 'hide') {
@@ -599,6 +603,8 @@ class BigCmdlineProvider {
         draft = '';
         setStatus('', 'neutral');
         render(true);
+        document.body.classList.add('idle');
+        input.blur();
       } else if (message.type === 'status') {
         setStatus(message.text || '', message.tone || 'neutral');
       } else if (message.type === 'config') {
@@ -619,6 +625,10 @@ class BigCmdlineProvider {
     input.addEventListener('input', () => {
       historyIndex = -1;
       render();
+    });
+
+    idleEl.addEventListener('click', () => {
+      vscode.postMessage({ type: 'activate', prefix: ':' });
     });
 
     input.addEventListener('keydown', event => {
@@ -1266,8 +1276,8 @@ async function focusCmdlineView() {
   }
 
   vscode.window.showWarningMessage(
-    'Vim Big Cmdline could not reveal its command line. If you dragged the "Vim Cmdline" view out of the bottom panel, ' +
-      'drag it back, or run "View: Reset View Locations" to restore it.'
+    'Vim Big Cmdline could not reveal its command line. If you hid the "Vim Cmdline" view, ' +
+      'run "View: Reset View Locations" to restore it.'
   );
 }
 
