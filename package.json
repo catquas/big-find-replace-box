@@ -94,7 +94,7 @@
             "match"
           ],
           "enumDescriptions": [
-            "Follow VSCodeVim's vim.ignorecase and vim.smartcase settings (both default to true, so matching is case-insensitive until the pattern contains an uppercase letter).",
+            "Follow VSCodeVim's vim.ignorecase and vim.smartcase settings (both default to true, so matching is case-insensitive until the pattern contains an uppercase letter — including one inside an escape such as \\S, which is how VSCodeVim tests it).",
             "Always ignore case in the preview.",
             "Always match case in the preview."
           ],
@@ -104,14 +104,14 @@
         "vimBigCmdline.regexFlavor": {
           "type": "string",
           "enum": [
-            "vim",
+            "vscodevim",
             "javascript"
           ],
           "enumDescriptions": [
-            "Interpret patterns using Vim 'magic' rules: ( ) { } + ? | are literal until escaped with a backslash.",
-            "Interpret patterns as JavaScript regular expressions."
+            "Translate patterns the way VSCodeVim does: JavaScript regex syntax, so ( ) group and + ? | { } work unescaped, plus VSCodeVim's escapes (\\c, \\C, \\<, \\>, \\n, \\x, \\h, \\a, \\l, \\u and so on). Note that \\( and \\+ are literal characters here, as they are in VSCodeVim.",
+            "Interpret patterns as plain JavaScript regular expressions, with no escape translation at all."
           ],
-          "default": "vim",
+          "default": "vscodevim",
           "description": "Regex dialect used for the live preview. This only affects the preview; VSCodeVim always executes the command itself."
         },
         "vimBigCmdline.restoreSidebarWhenDone": {

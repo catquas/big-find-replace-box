@@ -7,8 +7,9 @@ It intercepts `/`, `?`, and `:` while VSCodeVim is active and not in Insert mode
 For substitute commands such as:
 
 ```vim
-:%s/foo\(bar\)\+/baz/g
-:s/[A-Z]\+/word/g
+:%s/foo(bar)+/baz/g
+:%s/("salary".*)/"salary"\1/
+:s/[A-Z]+/word/g
 ```
 
 the command line highlights the range, command, delimiters, search regex, replacement text, and flags with separate colors.
@@ -22,15 +23,27 @@ While you are typing a search or substitute pattern, the extension also decorate
 
 A status line under the input reports what the pattern currently does — `12 matches · ignore case`, `4 replacements on 3 lines · whole file`, `No matches`, or `Invalid pattern`.
 
-## Case sensitivity
+## Regex syntax: VSCodeVim's, not Vim's
 
-The preview follows VSCodeVim's own rules, so what you see is what VSCodeVim will do:
+VSCodeVim does not implement Vim's magic modes. Its pattern parser recognizes a short list of backslash escapes and hands everything else straight to JavaScript's `RegExp` ([`src/vimscript/pattern.ts`](https://github.com/VSCodeVim/Vim/blob/master/src/vimscript/pattern.ts)), so patterns behave like JavaScript regexes:
+
+- `(` and `)` **group**, and `+`, `?`, `|`, `{n,m}` are quantifiers and alternation — no backslash needed. `:%s/("salary".*)/"salary"\1/` works.
+- `\(`, `\+`, `\|` are **literal characters**, the opposite of Vim. Old Vim habits do not carry over, and neither does `\%(`.
+- `\d`, `\w`, `\s`, `\b` and other JavaScript classes work as written.
+- VSCodeVim's own escapes are translated: `\<` and `\>` become `\b`, `\n` becomes `\r?\n`, and `\x \X \o \h \H \a \A \l \L \u \U` become the matching character classes.
+- A pattern that will not compile — `("salary"` while you are still typing it — is matched literally instead of erroring, the same fallback VSCodeVim uses. The status line says `incomplete, matching literally` when that happens.
+
+Case follows VSCodeVim too:
 
 - `vim.ignorecase` (default `true`) makes matching case-insensitive.
-- `vim.smartcase` (default `true`) makes a pattern case-sensitive as soon as it contains an uppercase letter. Backslash escapes do not count, so `foo\S` stays case-insensitive but `Foo` does not.
-- `\c` and `\C` anywhere in the pattern force ignore-case / match-case and beat everything else.
-- `:s///i` and `:s///I` force ignore-case / match-case for that substitution, unless `\c`/`\C` is also present.
+- `vim.smartcase` (default `true`) makes a pattern case-sensitive as soon as it contains an uppercase letter. VSCodeVim tests this against the *translated* pattern, so `foo\S` counts as uppercase and turns matching case-sensitive — real Vim would not. The preview copies VSCodeVim.
+- `\c` and `\C` anywhere in the pattern force ignore-case / match-case and beat everything else; a `\c` wins over a `\C` wherever each appears.
+- `:s///i` and `:s///I` do **nothing**. VSCodeVim parses those flags and never applies them, so the preview ignores them as well. Use `\c` or `\C`.
 - `vimBigCmdline.caseSensitivity` can pin the preview to `ignore` or `match` regardless of the above.
+
+In a replacement, `&` and `\0` are the whole match, `\1`–`\9` are capture groups, `\u` and `\l` change the case of the next character, `\U` and `\L` do so until `\e` or `\E`, and `\n`, `\t`, `\r`, `\&` and `\\` are literals — matching VSCodeVim's [`substitute.ts`](https://github.com/VSCodeVim/Vim/blob/master/src/cmd_line/commands/substitute.ts). `$` carries no special meaning.
+
+Set `vimBigCmdline.regexFlavor` to `javascript` to skip the escape translation entirely and type raw JavaScript regexes.
 
 ## Keys in the command line
 
@@ -76,7 +89,7 @@ The text is sized off your editor font (`vimBigCmdline.fontSize` = `0`), 15% lar
 - `vimBigCmdline.restoreSidebarWhenDone`: default `true`
 - `vimBigCmdline.restoreSidebarCommand`: default `workbench.view.explorer`
 - `vimBigCmdline.caseSensitivity`: `auto` (default), `ignore`, or `match`
-- `vimBigCmdline.regexFlavor`: `vim` (default) or `javascript`
+- `vimBigCmdline.regexFlavor`: `vscodevim` (default) or `javascript`
 - `vimBigCmdline.executeWithVscodeVimRemap`: default `true`
 
 ## Notes
@@ -85,4 +98,4 @@ VS Code extensions cannot directly enlarge another extension's status bar input,
 
 VS Code does not tell extensions which view was showing in the sidebar before, and gives them no way to collapse a view section ([microsoft/vscode#88219](https://github.com/microsoft/vscode/issues/88219)), so where the sidebar goes afterwards is a setting rather than something the extension detects.
 
-The live preview uses a JavaScript approximation of Vim regex syntax. By default it follows Vim's "magic" rules, where `( ) { } + ? |` are literal until escaped — so `\(`, `\)`, `\+`, `\?`, `\|`, `\{`, `\}`, `\%(`, `\=`, and `\<`/`\>` word boundaries all work, as do `&` and `\1`-style references in the replacement. Set `vimBigCmdline.regexFlavor` to `javascript` if you would rather type JavaScript regexes. Either way this only affects the preview: VSCodeVim executes the real command.
+The live preview reimplements VSCodeVim's pattern translation rather than Vim's, because VSCodeVim is what executes the command — see [Regex syntax](#regex-syntax-vscodevims-not-vims) above. That includes its quirks: smartcase tested against the translated pattern, `:s///i` ignored, `\O` left untranslated because VSCodeVim's escape table lists `o` twice. The preview only ever describes what VSCodeVim will do; it never runs the command itself.
