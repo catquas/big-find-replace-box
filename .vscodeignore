@@ -1,0 +1,7 @@
+# Everything the extension does not need at runtime. src/ and media/ are the
+# extension itself; README and LICENSE are shown by VS Code.
+.vscode/**
+.gitignore
+.git/**
+*.vsix
+node_modules/**

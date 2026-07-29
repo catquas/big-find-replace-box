@@ -5,6 +5,17 @@
   "version": "0.0.1",
   "publisher": "local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/catquas/big-find-replace-box.git"
+  },
+  "bugs": {
+    "url": "https://github.com/catquas/big-find-replace-box/issues"
+  },
+  "homepage": "https://github.com/catquas/big-find-replace-box#readme",
+  "scripts": {
+    "package": "npx --yes @vscode/vsce@^3.9.2 package"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
