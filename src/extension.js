@@ -4,6 +4,7 @@ const VIEW_ID = 'vimBigCmdline.view';
 const MAX_DECORATIONS = 5000;
 const HISTORY_LIMIT = 100;
 const PREVIEW_DEBOUNCE_MS = 40;
+const DEFAULT_RESTORE_COMMAND = 'workbench.view.explorer';
 const HISTORY_KEYS = {
   search: 'vimBigCmdline.history.search',
   command: 'vimBigCmdline.history.command',
@@ -54,6 +55,7 @@ class BigCmdlineProvider {
     this.decoratedEditor = undefined;
     this.active = false;
     this.revealedView = false;
+    this.warnedRestoreFailure = false;
     this.searchDecoration = vscode.window.createTextEditorDecorationType({
       backgroundColor: new vscode.ThemeColor('editor.findMatchHighlightBackground'),
       border: '1px solid',
@@ -153,9 +155,11 @@ class BigCmdlineProvider {
   }
 
   /**
-   * Undo the reveal from `open`. We only touch the sidebar when opening the
-   * command line is what brought it on screen; if the view was already visible,
-   * the user's layout is left alone.
+   * Undo the reveal from `open`. The command line gets out of the way by handing
+   * the sidebar back to the view the user keeps there, so it shrinks to its
+   * activity bar icon rather than taking the sidebar down with it. We only do
+   * this when opening the command line is what revealed the view; if it was
+   * already on screen, the user's layout is left alone.
    */
   async restoreSidebar() {
     const revealed = this.revealedView;
@@ -166,8 +170,20 @@ class BigCmdlineProvider {
       return;
     }
 
-    const command = String(config.get('restoreSidebarCommand', '') || '').trim();
-    await runCommandQuietly(command || 'workbench.action.closeSidebar');
+    const command = String(config.get('restoreSidebarCommand', DEFAULT_RESTORE_COMMAND) || '').trim();
+    if (!command || (await runCommandQuietly(command))) {
+      return;
+    }
+
+    // A misspelled command would otherwise fail silently on every Esc, so say
+    // so once and then stay quiet for the rest of the session.
+    if (!this.warnedRestoreFailure) {
+      this.warnedRestoreFailure = true;
+      vscode.window.showWarningMessage(
+        `Vim Big Cmdline could not run "${command}" to put the sidebar back. ` +
+          'Check vimBigCmdline.restoreSidebarCommand.'
+      );
+    }
   }
 
   show(prefix) {
