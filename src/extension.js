@@ -8,6 +8,8 @@ const DEFAULT_RESTORE_COMMAND = 'workbench.view.explorer';
 // 0 means "follow the editor font"; the webview turns that into a size derived
 // from VS Code's own --vscode-editor-font-size.
 const AUTO_FONT_SIZE = 0;
+// The characters VSCodeVim escapes when a pattern will not compile.
+const SPECIAL_CHARS = /[\-\[\]{}()*+?.,\\\^$|#\s]/g;
 const HISTORY_KEYS = {
   search: 'vimBigCmdline.history.search',
   command: 'vimBigCmdline.history.command',
@@ -292,13 +294,17 @@ class BigCmdlineProvider {
   }
 
   previewSearch(editor, pattern, reverse) {
-    const compiled = compilePattern(pattern);
+    const compiled = compilePattern(pattern, reverse ? '?' : '/');
     if (!compiled) {
       this.setStatus('Invalid pattern', 'error');
       return;
     }
 
-    const ranges = findMatches(editor.document, compiled.regex, fullDocumentRange(editor.document));
+    const ranges = findMatches(
+      editor.document,
+      compiled.regex,
+      fullDocumentRange(editor.document)
+    ).map((match) => match.range);
     if (ranges.length === 0) {
       this.setStatus(`No matches${caseSuffix(compiled)}`, 'warn');
       return;
@@ -320,7 +326,10 @@ class BigCmdlineProvider {
   }
 
   previewSubstitute(editor, parsed) {
-    const compiled = compilePattern(parsed.pattern, substituteFlagCaseOverride(parsed.flags));
+    // No case handling for the :s///i and :s///I flags: VSCodeVim parses them
+    // and then never applies them, so honoring them here would show a preview
+    // of something that is not going to happen.
+    const compiled = compilePattern(parsed.pattern, parsed.delimiter);
     if (!compiled) {
       this.setStatus('Invalid pattern', 'error');
       return;
@@ -338,9 +347,8 @@ class BigCmdlineProvider {
     const afterDecorations = [];
     const touchedLines = new Set();
 
-    for (const range of matches) {
-      const text = editor.document.getText(range);
-      const replacement = expandReplacement(parsed.replacement, text, compiled.regex);
+    for (const { range, groups } of matches) {
+      const replacement = expandReplacement(parsed.replacement, groups);
       replaceDecorations.push(range);
       touchedLines.add(range.start.line);
       afterDecorations.push({
@@ -361,9 +369,7 @@ class BigCmdlineProvider {
       return;
     }
 
-    if (matches.length) {
-      editor.revealRange(matches[0], vscode.TextEditorRevealType.InCenterIfOutsideViewport);
-    }
+    editor.revealRange(matches[0].range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 
     const capped = matches.length >= MAX_DECORATIONS ? '+' : '';
     const scope = describeRange(parsed.range);
@@ -444,16 +450,18 @@ class BigCmdlineProvider {
     .shell {
       display: flex;
       align-items: stretch;
-      gap: 10px;
       flex: 1 1 auto;
       min-height: 0;
       width: 100%;
     }
+    /* The prefix sits right against the text, at the same size and line height
+       so the two share a baseline: ":%s/foo/bar" reads as one line, and none of
+       the width goes to a gap. */
     .prefix {
       flex: 0 0 auto;
-      padding-top: 6px;
+      padding-top: 8px;
       color: var(--vscode-terminal-ansiBrightCyan);
-      font-size: calc(var(--cmd-font-size) * 1.1);
+      font-size: var(--cmd-font-size);
       font-weight: 800;
       line-height: 1.35;
     }
@@ -483,7 +491,7 @@ class BigCmdlineProvider {
       width: 100%;
       min-height: calc(var(--cmd-font-size) * 1.75);
       margin: 0;
-      padding: 8px 12px;
+      padding: 8px 6px 8px 3px;
       border: 0;
       font-family: var(--cmd-font-family);
       font-size: var(--cmd-font-size);
@@ -945,71 +953,160 @@ function readUntilDelimiter(text, delimiter, start) {
 }
 
 /**
- * Compile a Vim-flavored pattern into a JavaScript RegExp, applying the same
- * case rules VSCodeVim uses (`vim.ignorecase` / `vim.smartcase`, plus inline
- * `\c` / `\C` overrides).
+ * Compile a pattern the way VSCodeVim does, so the preview matches what will
+ * actually run.
  *
- * @returns {{ regex: RegExp, ignoreCase: boolean, override: 'insensitive'|'sensitive'|undefined } | undefined}
+ * VSCodeVim does not implement Vim's magic modes. Apart from a small table of
+ * backslash escapes its parser hands the pattern straight to JavaScript's
+ * RegExp (src/vimscript/pattern.ts), so `(` groups, `+` repeats and `|`
+ * alternates without being escaped, and `\(` is a *literal* paren — the
+ * opposite of Vim. Quirks included, because VSCodeVim is what runs the command.
+ *
+ * @returns {{ regex: RegExp, ignoreCase: boolean, override: 'insensitive'|'sensitive'|undefined, escaped: boolean } | undefined}
  */
-function compilePattern(pattern, flagOverride) {
+function compilePattern(pattern, delimiter) {
   if (!pattern) {
     return undefined;
   }
 
-  const { pattern: stripped, override: inlineOverride } = extractCaseOverride(pattern);
-  // Vim: \c / \C inside the pattern overrule the :s///i and :s///I flags.
-  const override = inlineOverride || flagOverride;
-  const flavor = vscode.workspace.getConfiguration('vimBigCmdline').get('regexFlavor', 'vim');
-  const source = flavor === 'javascript' ? stripped : vimRegexToJavaScript(stripped);
-  const ignoreCase = shouldIgnoreCase(stripped, override);
+  const flavor = vscode.workspace.getConfiguration('vimBigCmdline').get('regexFlavor', 'vscodevim');
+  const { source, override } =
+    flavor === 'javascript'
+      ? { source: pattern, override: undefined }
+      : vscodeVimPatternToJavaScript(pattern, delimiter);
+  const ignoreCase = shouldIgnoreCase(source, override);
+  const flags = ignoreCase ? 'gim' : 'gm';
 
   try {
-    return { regex: new RegExp(source, ignoreCase ? 'gi' : 'g'), ignoreCase, override };
+    return { regex: new RegExp(source, flags), ignoreCase, override, escaped: false };
   } catch {
-    return undefined;
+    // VSCodeVim's own fallback: a pattern that will not compile is retried with
+    // every special character escaped, so a half-typed `(` still matches text
+    // instead of reporting an error.
+    try {
+      const literal = source.replace(SPECIAL_CHARS, '\\$&');
+      return { regex: new RegExp(literal, flags), ignoreCase, override, escaped: true };
+    } catch {
+      return undefined;
+    }
   }
 }
 
 /**
- * Remove Vim's inline case markers (`\c` = ignore case, `\C` = match case) from
- * a pattern, reporting whichever one appeared first. Vim honors these anywhere
- * in the pattern, regardless of 'ignorecase'/'smartcase'.
+ * VSCodeVim's escape table. Anything missing keeps its backslash, so `\d` and
+ * friends stay JavaScript classes while `\(`, `\+` and `\|` come out literal.
+ * `\O` is absent because VSCodeVim's own table lists 'o' twice and never
+ * reaches it.
  */
-function extractCaseOverride(pattern) {
-  let out = '';
+const VSCODEVIM_ESCAPES = new Map(Object.entries({
+  x: '[0-9A-Fa-f]',
+  X: '[^0-9A-Fa-f]',
+  o: '[0-7]',
+  h: '[A-Za-z_]',
+  H: '[^A-Za-z_]',
+  a: '[A-Za-z]',
+  A: '[^A-Za-z]',
+  l: '[a-z]',
+  L: '[^a-z]',
+  u: '[A-Z]',
+  U: '[^A-Z]',
+  '<': '\\b',
+  '>': '\\b',
+  n: '\\r?\\n',
+}));
+
+/**
+ * Translate a pattern to the JavaScript source VSCodeVim would build from it,
+ * reporting any inline `\c` / `\C` separately since those are stripped from the
+ * pattern rather than compiled into it.
+ *
+ * @returns {{ source: string, override: 'insensitive'|'sensitive'|undefined }}
+ */
+function vscodeVimPatternToJavaScript(pattern, delimiter) {
+  let source = '';
   let override;
 
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i];
-    if (char !== '\\' || i + 1 >= pattern.length) {
-      out += char;
-      continue;
-    }
 
-    const next = pattern[i + 1];
-    if (next === 'c' || next === 'C') {
-      override = override || (next === 'c' ? 'insensitive' : 'sensitive');
+    if (char === '\\') {
+      const escaped = pattern[i + 1];
       i++;
+
+      if (escaped === undefined) {
+        source += '\\\\';
+        break;
+      }
+      // \%V limits a search to the selection and adds nothing to the pattern.
+      if (escaped === '%' && pattern[i + 1] === 'V') {
+        i++;
+        continue;
+      }
+      // A later \c still wins over an earlier \C, as in VSCodeVim.
+      if (escaped === 'c') {
+        override = 'insensitive';
+        continue;
+      }
+      if (escaped === 'C') {
+        override = override || 'sensitive';
+        continue;
+      }
+      if (escaped === delimiter) {
+        source += escaped;
+        continue;
+      }
+      source += VSCODEVIM_ESCAPES.get(escaped) ?? '\\' + escaped;
       continue;
     }
 
-    out += char + next;
-    i++;
+    // Character classes are copied across untouched, escapes and all.
+    if (char === '[') {
+      const end = findCharacterClassEnd(pattern, i + 1);
+      if (end >= 0) {
+        source += pattern.slice(i, end + 1);
+        i = end;
+        continue;
+      }
+      source += char;
+      continue;
+    }
+
+    // VSCodeVim wraps the anchors so \r\n does not read as two lines.
+    if (char === '^') {
+      source += '(?:^(?<!\\r))';
+      continue;
+    }
+    if (char === '$') {
+      source += '(?:$(?<!\\r))';
+      continue;
+    }
+
+    source += char;
   }
 
-  return { pattern: out, override };
+  return { source, override };
 }
 
-/** Vim's `:s///i` forces ignore case and `:s///I` forces match case. */
-function substituteFlagCaseOverride(flags) {
-  const match = String(flags || '').match(/[iI]/);
-  if (!match) {
-    return undefined;
+function findCharacterClassEnd(pattern, start) {
+  for (let i = start; i < pattern.length; i++) {
+    if (pattern[i] === '\\') {
+      i++;
+    } else if (pattern[i] === ']') {
+      return i;
+    }
   }
-  return match[0] === 'i' ? 'insensitive' : 'sensitive';
+  return -1;
 }
 
-function shouldIgnoreCase(pattern, override) {
+/**
+ * Case rules in VSCodeVim's order: an inline `\c` / `\C` wins, then this
+ * extension's own pin, then smartcase, then vim.ignorecase.
+ *
+ * VSCodeVim tests smartcase with /[A-Z]/ against the *translated* pattern, so
+ * `\S` counts as an uppercase letter and `\a` does too once it has become
+ * [A-Za-z]. Real Vim skips escapes; this follows VSCodeVim.
+ */
+function shouldIgnoreCase(source, override) {
   if (override) {
     return override === 'insensitive';
   }
@@ -1023,88 +1120,10 @@ function shouldIgnoreCase(pattern, override) {
   }
 
   const vim = vscode.workspace.getConfiguration('vim');
-  if (!vim.get('ignorecase', true)) {
+  if (vim.get('smartcase', true) && /[A-Z]/.test(source)) {
     return false;
   }
-  if (vim.get('smartcase', true) && hasUppercase(pattern)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * Vim's smartcase check skips backslash escapes, so `\S` does not make a
- * pattern case-sensitive but `Foo` does.
- */
-function hasUppercase(pattern) {
-  for (let i = 0; i < pattern.length; i++) {
-    if (pattern[i] === '\\') {
-      i++;
-      continue;
-    }
-    if (pattern[i] !== pattern[i].toLowerCase()) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Translate Vim "magic" regex syntax to JavaScript in a single pass, so that
- * escaped backslashes (`\\(`) are not mistaken for group markers. In magic mode
- * `( ) { } + ? |` are literal until escaped, which is the opposite of JS.
- */
-function vimRegexToJavaScript(pattern) {
-  let out = '';
-
-  for (let i = 0; i < pattern.length; i++) {
-    const char = pattern[i];
-
-    if (char === '\\' && i + 1 < pattern.length) {
-      const next = pattern[i + 1];
-      i++;
-      switch (next) {
-        case '(':
-        case ')':
-        case '{':
-        case '}':
-        case '+':
-        case '|':
-        case '?':
-          out += next;
-          break;
-        case '=':
-          out += '?';
-          break;
-        case '<':
-        case '>':
-          out += '\\b';
-          break;
-        case '%':
-          if (pattern[i + 1] === '(') {
-            out += '(?:';
-            i++;
-          } else {
-            out += '%';
-          }
-          break;
-        default:
-          out += '\\' + next;
-          break;
-      }
-      continue;
-    }
-
-    // Literal in Vim, special in JavaScript.
-    if ('(){}+?|'.includes(char)) {
-      out += '\\' + char;
-      continue;
-    }
-
-    out += char;
-  }
-
-  return out;
+  return vim.get('ignorecase', true);
 }
 
 function fullDocumentRange(document) {
@@ -1195,6 +1214,12 @@ function lineRange(document, line) {
   return new vscode.Range(safe, 0, safe, document.lineAt(safe).text.length);
 }
 
+/**
+ * Find matches line by line.
+ *
+ * @returns {{ range: vscode.Range, groups: (string|undefined)[] }[]} each match
+ * with its capture groups, which the replacement preview needs.
+ */
 function findMatches(document, regex, searchRange, maxPerLine = Infinity) {
   const ranges = [];
   const startLine = searchRange.start.line;
@@ -1219,7 +1244,10 @@ function findMatches(document, regex, searchRange, maxPerLine = Infinity) {
       }
       const start = lineStart + match.index;
       const end = start + match[0].length;
-      ranges.push(new vscode.Range(lineNumber, start, lineNumber, end));
+      ranges.push({
+        range: new vscode.Range(lineNumber, start, lineNumber, end),
+        groups: Array.from(match),
+      });
       perLineCount++;
     }
   }
@@ -1239,18 +1267,87 @@ function chooseCurrentSearchMatch(ranges, position, reverse) {
   return ranges.find((range) => range.start.isAfter(position) || range.start.isEqual(position)) || ranges[0];
 }
 
-function expandReplacement(replacement, matchedText, regex) {
-  try {
-    regex.lastIndex = 0;
-    const jsReplacement = replacement
-      .replace(/\$/g, '$$$$')
-      .replace(/(^|[^\\])&/g, '$1$$&')
-      .replace(/\\&/g, '&')
-      .replace(/\\(\d)/g, '$$$1');
-    return matchedText.replace(regex, jsReplacement);
-  } catch {
-    return replacement;
+/** Literal escapes VSCodeVim recognizes in a replacement. */
+const REPLACEMENT_LITERALS = new Map(Object.entries({
+  '\\': '\\',
+  '/': '/',
+  b: '\b',
+  r: '\r',
+  n: '\n',
+  t: '\t',
+  '&': '&',
+  '~': '~',
+}));
+
+/**
+ * Expand a substitute replacement the way VSCodeVim does
+ * (src/cmd_line/commands/substitute.ts): `&` and `\0` are the whole match,
+ * `\1`-`\9` are capture groups, `\u` / `\l` change the case of the next
+ * character and `\U` / `\L` do so until `\e` / `\E`.
+ *
+ * @param {(string|undefined)[]} groups the match and its capture groups
+ */
+function expandReplacement(replacement, groups) {
+  let out = '';
+  let run;
+  let nextChar;
+
+  const append = (text) => {
+    for (const char of text) {
+      if (nextChar) {
+        out += nextChar === 'upper' ? char.toUpperCase() : char.toLowerCase();
+        nextChar = undefined;
+      } else if (run) {
+        out += run === 'upper' ? char.toUpperCase() : char.toLowerCase();
+      } else {
+        out += char;
+      }
+    }
+  };
+
+  for (let i = 0; i < replacement.length; i++) {
+    const char = replacement[i];
+
+    if (char === '&') {
+      append(groups[0] ?? '');
+      continue;
+    }
+    if (char !== '\\') {
+      append(char);
+      continue;
+    }
+
+    const escaped = replacement[i + 1];
+    i++;
+
+    if (escaped === undefined) {
+      append('\\');
+      break;
+    }
+    if (REPLACEMENT_LITERALS.has(escaped)) {
+      append(REPLACEMENT_LITERALS.get(escaped));
+      continue;
+    }
+    if (escaped >= '0' && escaped <= '9') {
+      append(groups[Number(escaped)] ?? '');
+      continue;
+    }
+    if (escaped === 'u' || escaped === 'l') {
+      nextChar = escaped === 'u' ? 'upper' : 'lower';
+      continue;
+    }
+    if (escaped === 'U' || escaped === 'L') {
+      run = escaped === 'U' ? 'upper' : 'lower';
+      continue;
+    }
+    if (escaped === 'e' || escaped === 'E') {
+      run = undefined;
+      continue;
+    }
+    append('\\' + escaped);
   }
+
+  return out;
 }
 
 function caseSuffix(compiled) {
@@ -1258,7 +1355,11 @@ function caseSuffix(compiled) {
     return '';
   }
   const forced = compiled.override ? ' (forced)' : '';
-  return compiled.ignoreCase ? ` · ignore case${forced}` : ` · match case${forced}`;
+  // VSCodeVim falls back to matching the pattern literally when it will not
+  // compile, which is worth saying out loud: it is why a half-typed group still
+  // shows matches.
+  const literal = compiled.escaped ? ' · incomplete, matching literally' : '';
+  return (compiled.ignoreCase ? ` · ignore case${forced}` : ` · match case${forced}`) + literal;
 }
 
 function describeRange(rangeText) {
@@ -1339,8 +1440,6 @@ module.exports = {
   deactivate,
   // Exported for manual testing / reuse.
   parseSubstitute,
-  vimRegexToJavaScript,
-  extractCaseOverride,
-  hasUppercase,
+  vscodeVimPatternToJavaScript,
   expandReplacement,
 };
