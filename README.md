@@ -73,6 +73,21 @@ The input box grows with your text and scrolls internally once it outgrows the s
 
 The text is sized off your editor font (`vimBigCmdline.fontSize` = `0`), 15% larger, so it reads as slightly-enlarged editor text and a long substitute still fits on a line or two. Set `vimBigCmdline.fontSize` to a number of pixels to pin it instead.
 
+## Installing it
+
+There is no build step — the extension is plain JavaScript — so packaging is one command:
+
+```bash
+npm run package                                  # -> vim-big-cmdline-0.0.1.vsix
+code --install-extension vim-big-cmdline-0.0.1.vsix
+```
+
+Then reload the window. Without the CLI, use the Extensions panel → `...` → **Install from VSIX…**. VSCodeVim is listed as an extension dependency, so VS Code installs it alongside if it is missing.
+
+A `.vsix` installed this way does not auto-update: bump `version` in `package.json` and install again to upgrade.
+
+Publishing to the Marketplace needs more than this — a real `publisher` ID from an Azure DevOps organization (the manifest says `local`, which is fine for a `.vsix` you install or hand around yourself) and a 128×128 PNG `icon`, since the Marketplace does not accept the SVG that the sidebar uses.
+
 ## Running it locally
 
 1. Open this folder in VS Code.
