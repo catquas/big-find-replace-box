@@ -50,9 +50,11 @@ History is kept separately for searches (`/`, `?`) and commands (`:`), persists 
 
 Pressing `/`, `?`, or `:` reveals the **Vim Cmdline** view in the sidebar, and the input box fills the whole height of it — the extension does not move, resize, or reposition anything else in your layout.
 
-Pressing `Enter` or `Esc` turns the command line off again. The view goes back to an idle note, and if opening the command line is what put the sidebar on screen, the sidebar is closed again so you end up where you started (`vimBigCmdline.restoreSidebarWhenDone`). If the view was already visible before you pressed a key, your sidebar is left exactly as it was.
+Pressing `Enter` or `Esc` turns the command line off again. The view goes back to an idle note, and the sidebar — still open — goes back to showing the **Explorer**, so the command line shrinks to its icon in the activity bar rather than taking your sidebar down with it (`vimBigCmdline.restoreSidebarWhenDone`). If the view was already visible before you pressed a key, your sidebar is left exactly as it was.
 
-If you keep something else in the sidebar — the Explorer, say — set `vimBigCmdline.restoreSidebarCommand` to `workbench.view.explorer` and that is what you return to instead. The same setting covers moving the "Vim Cmdline" view elsewhere: drag it into the bottom panel and set the command to `workbench.action.closePanel`.
+`vimBigCmdline.restoreSidebarCommand` picks what you go back to: `workbench.view.scm`, `workbench.view.search`, or any other view command if you keep something else in the sidebar; `workbench.action.closeSidebar` if you would rather the sidebar closed; or empty to change nothing at all and leave the command line's own view on screen, idle.
+
+VS Code gives extensions no way to collapse a view section, and no way to ask which view was in the sidebar a moment ago, which is why the destination is a setting rather than something the extension works out for itself.
 
 The input box grows with your text and scrolls internally once it outgrows the sidebar, so a long substitute never gets clipped. `vimBigCmdline.panelHeightHint` sets a minimum height for it, and `vimBigCmdline.wrapLongInput` switches between wrapping and single-line horizontal scrolling.
 
@@ -70,7 +72,7 @@ The input box grows with your text and scrolls internally once it outgrows the s
 - `vimBigCmdline.panelHeightHint`: default `120`
 - `vimBigCmdline.wrapLongInput`: default `true`
 - `vimBigCmdline.restoreSidebarWhenDone`: default `true`
-- `vimBigCmdline.restoreSidebarCommand`: default `""` (hide the sidebar)
+- `vimBigCmdline.restoreSidebarCommand`: default `workbench.view.explorer`
 - `vimBigCmdline.caseSensitivity`: `auto` (default), `ignore`, or `match`
 - `vimBigCmdline.regexFlavor`: `vim` (default) or `javascript`
 - `vimBigCmdline.executeWithVscodeVimRemap`: default `true`
@@ -79,6 +81,6 @@ The input box grows with your text and scrolls internally once it outgrows the s
 
 VS Code extensions cannot directly enlarge another extension's status bar input, and VSCodeVim does not expose a full public API for mirroring its internal command-line buffer. This extension therefore replaces the command-line entry flow for the keys it owns, then hands the finished command/search back to VSCodeVim. VS Code also gives extensions no way to float a popup over the editor, so a view that fills the sidebar is the largest surface available.
 
-VS Code does not tell extensions which sidebar container was showing before, which is why returning to something other than a hidden sidebar needs `vimBigCmdline.restoreSidebarCommand` rather than being detected automatically.
+VS Code does not tell extensions which view was showing in the sidebar before, and gives them no way to collapse a view section ([microsoft/vscode#88219](https://github.com/microsoft/vscode/issues/88219)), so where the sidebar goes afterwards is a setting rather than something the extension detects.
 
 The live preview uses a JavaScript approximation of Vim regex syntax. By default it follows Vim's "magic" rules, where `( ) { } + ? |` are literal until escaped — so `\(`, `\)`, `\+`, `\?`, `\|`, `\{`, `\}`, `\%(`, `\=`, and `\<`/`\>` word boundaries all work, as do `&` and `\1`-style references in the replacement. Set `vimBigCmdline.regexFlavor` to `javascript` if you would rather type JavaScript regexes. Either way this only affects the preview: VSCodeVim executes the real command.

@@ -117,12 +117,12 @@
         "vimBigCmdline.restoreSidebarWhenDone": {
           "type": "boolean",
           "default": true,
-          "description": "When you press Enter or Esc, put the sidebar back the way it was. This only applies when opening the command line is what revealed the sidebar; if its view was already on screen, the sidebar is left alone."
+          "description": "When you press Enter or Esc, hand the sidebar back to the view named by vimBigCmdline.restoreSidebarCommand, so the command line shrinks to its activity bar icon. This only applies when opening the command line is what revealed it; if its view was already on screen, the sidebar is left alone."
         },
         "vimBigCmdline.restoreSidebarCommand": {
           "type": "string",
-          "default": "",
-          "description": "Command to run instead of hiding the sidebar when the command line closes. Set it to workbench.view.explorer to go back to the Explorer, or to workbench.action.closePanel if you moved the \"Vim Cmdline\" view into the bottom panel. Empty means workbench.action.closeSidebar."
+          "default": "workbench.view.explorer",
+          "description": "Which view the sidebar goes back to when the command line closes. Use workbench.view.scm, workbench.view.search, or any other view command if you keep something else there — or workbench.action.closeSidebar to hide the sidebar entirely. Leave it empty to change nothing and keep the command line's view on screen in its idle state."
         },
         "vimBigCmdline.executeWithVscodeVimRemap": {
           "type": "boolean",
