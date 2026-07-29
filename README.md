@@ -1,8 +1,8 @@
 # Vim Big Cmdline
 
-This VS Code extension gives [VSCodeVim](https://github.com/VSCodeVim/Vim) a large command/search input in the bottom panel.
+This VS Code extension gives [VSCodeVim](https://github.com/VSCodeVim/Vim) a large command/search input that takes over the sidebar.
 
-It intercepts `/`, `?`, and `:` while VSCodeVim is active and not in Insert mode, opens a large bottom input, previews matches while you type, and sends the completed input back to VSCodeVim through `vim.remap`.
+It intercepts `/`, `?`, and `:` while VSCodeVim is active and not in Insert mode, opens a large input filling the sidebar, previews matches while you type, and sends the completed input back to VSCodeVim through `vim.remap`.
 
 For substitute commands such as:
 
@@ -46,17 +46,15 @@ The preview follows VSCodeVim's own rules, so what you see is what VSCodeVim wil
 
 History is kept separately for searches (`/`, `?`) and commands (`:`), persists across sessions, and can be wiped with **Vim Big Cmdline: Clear Command History**.
 
-## Layout: a bar across the bottom of the screen
+## Layout: it takes over the sidebar, then gives it back
 
-Pressing `/`, `?`, or `:` now does three things before showing the input:
+Pressing `/`, `?`, or `:` reveals the **Vim Cmdline** view in the sidebar, and the input box fills the whole height of it — the extension does not move, resize, or reposition anything else in your layout.
 
-1. Moves VS Code's panel to the **bottom** of the window, so the command line is a full-width bar across the bottom of the screen instead of a column beside the editor (`vimBigCmdline.forceBottomPanelPosition`).
-2. **Enlarges** the panel so there is plenty of room to type, then shrinks it back to your normal size when you finish (`vimBigCmdline.panelSizeBoost`, or `vimBigCmdline.maximizePanelOnOpen` to take over the whole window).
-3. Shows the bar only while it is in use — `Enter` or `Esc` closes the panel again (`vimBigCmdline.hidePanelWhenDone`).
+Pressing `Enter` or `Esc` turns the command line off again. The view goes back to an idle note, and if opening the command line is what put the sidebar on screen, the sidebar is closed again so you end up where you started (`vimBigCmdline.restoreSidebarWhenDone`). If the view was already visible before you pressed a key, your sidebar is left exactly as it was.
 
-Within that bar, the input box grows with your text and scrolls internally once it outgrows the panel, so a long substitute never gets clipped. `vimBigCmdline.panelHeightHint` sets the minimum height of the input box, and `vimBigCmdline.wrapLongInput` switches between wrapping and single-line horizontal scrolling.
+If you keep something else in the sidebar — the Explorer, say — set `vimBigCmdline.restoreSidebarCommand` to `workbench.view.explorer` and that is what you return to instead. The same setting covers moving the "Vim Cmdline" view elsewhere: drag it into the bottom panel and set the command to `workbench.action.closePanel`.
 
-VS Code gives extensions no way to float a truly standalone bar or popup over the editor — the panel is the only full-width bottom surface available to an extension — so the extension drives the panel to behave like one. If you previously dragged the "Vim Cmdline" view into a side bar, drag it back onto the panel, or run **View: Reset View Locations**.
+The input box grows with your text and scrolls internally once it outgrows the sidebar, so a long substitute never gets clipped. `vimBigCmdline.panelHeightHint` sets a minimum height for it, and `vimBigCmdline.wrapLongInput` switches between wrapping and single-line horizontal scrolling.
 
 ## Running it locally
 
@@ -71,16 +69,16 @@ VS Code gives extensions no way to float a truly standalone bar or popup over th
 - `vimBigCmdline.fontFamily`: default `var(--vscode-editor-font-family)`
 - `vimBigCmdline.panelHeightHint`: default `120`
 - `vimBigCmdline.wrapLongInput`: default `true`
-- `vimBigCmdline.forceBottomPanelPosition`: default `true`
-- `vimBigCmdline.hidePanelWhenDone`: default `true`
-- `vimBigCmdline.panelSizeBoost`: default `3`
-- `vimBigCmdline.maximizePanelOnOpen`: default `false`
+- `vimBigCmdline.restoreSidebarWhenDone`: default `true`
+- `vimBigCmdline.restoreSidebarCommand`: default `""` (hide the sidebar)
 - `vimBigCmdline.caseSensitivity`: `auto` (default), `ignore`, or `match`
 - `vimBigCmdline.regexFlavor`: `vim` (default) or `javascript`
 - `vimBigCmdline.executeWithVscodeVimRemap`: default `true`
 
 ## Notes
 
-VS Code extensions cannot directly enlarge another extension's status bar input, and VSCodeVim does not expose a full public API for mirroring its internal command-line buffer. This extension therefore replaces the command-line entry flow for the keys it owns, then hands the finished command/search back to VSCodeVim. VS Code also gives extensions no way to float a popup over the editor, so the bottom panel is the largest surface available.
+VS Code extensions cannot directly enlarge another extension's status bar input, and VSCodeVim does not expose a full public API for mirroring its internal command-line buffer. This extension therefore replaces the command-line entry flow for the keys it owns, then hands the finished command/search back to VSCodeVim. VS Code also gives extensions no way to float a popup over the editor, so a view that fills the sidebar is the largest surface available.
+
+VS Code does not tell extensions which sidebar container was showing before, which is why returning to something other than a hidden sidebar needs `vimBigCmdline.restoreSidebarCommand` rather than being detected automatically.
 
 The live preview uses a JavaScript approximation of Vim regex syntax. By default it follows Vim's "magic" rules, where `( ) { } + ? |` are literal until escaped — so `\(`, `\)`, `\+`, `\?`, `\|`, `\{`, `\}`, `\%(`, `\=`, and `\<`/`\>` word boundaries all work, as do `&` and `\1`-style references in the replacement. Set `vimBigCmdline.regexFlavor` to `javascript` if you would rather type JavaScript regexes. Either way this only affects the preview: VSCodeVim executes the real command.
